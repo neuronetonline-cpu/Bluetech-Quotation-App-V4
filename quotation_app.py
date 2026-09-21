@@ -7,7 +7,7 @@ from datetime import datetime
 from urllib.parse import quote
 
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox, filedialog, simpledialog
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -75,6 +75,17 @@ def db():
     if "cost" not in item_cols:
         c.execute("ALTER TABLE items ADD COLUMN cost REAL DEFAULT 0")
     c.execute("CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT)")
+    c.execute("CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, active INTEGER DEFAULT 1)")
+    qcols = {r[1] for r in c.execute("PRAGMA table_info(quotations)").fetchall()}
+    if "prepared_by" not in qcols:
+        c.execute("ALTER TABLE quotations ADD COLUMN prepared_by TEXT DEFAULT ''")
+    defaults = {
+        "cod_first_kg": "450",
+        "cod_additional_kg": "100",
+        "cod_commission": "2.5",
+    }
+    for key, value in defaults.items():
+        c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (key, value))
     c.commit()
     return c
 
@@ -89,11 +100,34 @@ def get_pdf_dir():
 
 
 def set_pdf_dir(folder):
+    folder = os.path.abspath(os.path.expanduser(folder))
     os.makedirs(folder, exist_ok=True)
     c = db()
     c.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('pdf_dir',?)", (folder,))
     c.commit()
     c.close()
+    return folder
+
+
+def get_setting(key, default=""):
+    c = db()
+    row = c.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    c.close()
+    return row[0] if row and row[0] is not None else default
+
+
+def set_setting(key, value):
+    c = db()
+    c.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (key, str(value)))
+    c.commit()
+    c.close()
+
+
+def get_users():
+    c = db()
+    rows = c.execute("SELECT id,name FROM users WHERE active=1 ORDER BY name COLLATE NOCASE").fetchall()
+    c.close()
+    return rows
 
 
 def next_qno():
@@ -144,6 +178,14 @@ class App:
         self.customer = tk.StringVar()
         self.phone = tk.StringVar()
         self.qdate = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
+        users = [name for _, name in get_users()]
+        if not users:
+            c = db()
+            c.execute("INSERT OR IGNORE INTO users(name,active) VALUES(?,1)", ("Admin",))
+            c.commit()
+            c.close()
+            users = ["Admin"]
+        self.prepared_by = tk.StringVar(value=users[0])
 
         fields = [
             ("Quotation No.", self.qno),
@@ -156,6 +198,9 @@ class App:
             ttk.Entry(info, textvariable=var, width=25).grid(
                 row=0, column=i * 2 + 1, sticky="ew", padx=5
             )
+        ttk.Label(info, text="Prepared By").grid(row=1, column=0, sticky="w", padx=5, pady=(8,0))
+        self.prepared_combo = ttk.Combobox(info, textvariable=self.prepared_by, values=users, state="readonly", width=23)
+        self.prepared_combo.grid(row=1, column=1, sticky="ew", padx=5, pady=(8,0))
         for i in range(8):
             info.columnconfigure(i, weight=1)
 
@@ -195,6 +240,10 @@ class App:
         self.final90 = tk.StringVar(value="LKR 0.00")
         self.final180 = tk.StringVar(value="LKR 0.00")
         self.weight = tk.StringVar(value="0")
+        self.cod_charge = tk.StringVar(value="LKR 0.00")
+        self.cod_subtotal = tk.StringVar(value="LKR 0.00")
+        self.cod_commission = tk.StringVar(value="LKR 0.00")
+        self.cod_final = tk.StringVar(value="LKR 0.00")
 
         calc = ttk.LabelFrame(self.root, text="Internal Calculation", padding=10)
         calc.pack(fill="x", padx=12, pady=5)
@@ -205,6 +254,10 @@ class App:
             ("3 Months Final Price", self.final90),
             ("6 Months Final Price (+35%)", self.final180),
             ("Weight (KG)", self.weight),
+            ("COD Charge", self.cod_charge),
+            ("COD Subtotal", self.cod_subtotal),
+            ("COD Commission", self.cod_commission),
+            ("Final COD Price", self.cod_final),
         ]
         for i, (lab, var) in enumerate(labels):
             ttk.Label(calc, text=lab).grid(row=0, column=i, padx=5)
@@ -292,9 +345,27 @@ class App:
         final90 = cost + profit
         final180 = final90 * 1.35
 
+        weight = self.num(self.weight.get())
+        first_kg = self.num(get_setting("cod_first_kg", "450"))
+        additional_kg = self.num(get_setting("cod_additional_kg", "100"))
+        commission_pct = self.num(get_setting("cod_commission", "2.5"))
+        if weight <= 0:
+            cod_charge = 0
+        else:
+            import math
+            extra_kg = max(0, math.ceil(weight - 1))
+            cod_charge = first_kg + extra_kg * additional_kg
+        cod_subtotal = final90 + cod_charge
+        cod_commission = cod_subtotal * commission_pct / 100.0
+        cod_final = cod_subtotal + cod_commission
+
         self.total_cost.set(money(cost))
         self.final90.set(money(final90))
         self.final180.set(money(final180))
+        self.cod_charge.set(money(cod_charge))
+        self.cod_subtotal.set(money(cod_subtotal))
+        self.cod_commission.set(money(cod_commission))
+        self.cod_final.set(money(cod_final))
 
     def collect_items(self):
         out = []
@@ -344,6 +415,7 @@ class App:
             self.num(self.final90.get()),
             self.num(self.final180.get()),
             self.num(self.weight.get()),
+            self.prepared_by.get().strip(),
             datetime.now().isoformat()
         )
 
@@ -351,7 +423,7 @@ class App:
             c.execute(
                 """UPDATE quotations
                    SET qno=?,customer=?,phone=?,date=?,profit=?,
-                       warranty90=?,warranty180=?,weight=?,created_at=?
+                       warranty90=?,warranty180=?,weight=?,prepared_by=?,created_at=?
                    WHERE id=?""",
                 values + (self.editing_id,)
             )
@@ -361,8 +433,8 @@ class App:
         else:
             c.execute(
                 """INSERT INTO quotations
-                   (qno,customer,phone,date,profit,warranty90,warranty180,weight,created_at)
-                   VALUES(?,?,?,?,?,?,?,?,?)""",
+                   (qno,customer,phone,date,profit,warranty90,warranty180,weight,prepared_by,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?)""",
                 values
             )
             qid = c.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -469,7 +541,8 @@ class App:
             f"<b>Quotation No</b> : {self.qno.get()}<br/>"
             f"<b>Date</b> : {self.qdate.get()}<br/>"
             f"<b>Customer</b> : <font name='Helvetica-Bold'>{customer_name}</font><br/>"
-            f"<b>Phone / WhatsApp</b> : {self.phone.get()}",
+            f"<b>Phone / WhatsApp</b> : {self.phone.get()}<br/>"
+            f"<font size='7.5'>Prepared By : {self.prepared_by.get()}</font>",
             info_style
         )
 
@@ -712,65 +785,106 @@ class App:
     def settings(self):
         win = tk.Toplevel(self.root)
         win.title("Settings")
-        win.geometry("720x240")
+        win.geometry("760x520")
         win.resizable(False, False)
 
-        ttk.Label(
-            win, text="PDF / Quotation Save Location",
-            font=("Segoe UI", 11, "bold")
-        ).pack(anchor="w", padx=18, pady=(18, 8))
-
+        ttk.Label(win, text="PDF / Quotation Save Location", font=("Segoe UI", 11, "bold")).pack(anchor="w", padx=18, pady=(18, 8))
         row = ttk.Frame(win)
         row.pack(fill="x", padx=18)
-
         path_var = tk.StringVar(value=get_pdf_dir())
         entry = ttk.Entry(row, textvariable=path_var)
         entry.pack(side="left", fill="x", expand=True)
 
         def choose():
-            folder = filedialog.askdirectory(
-                title="Choose quotation save folder",
-                initialdir=path_var.get()
-            )
+            folder = filedialog.askdirectory(title="Choose quotation save folder", initialdir=path_var.get() if os.path.isdir(path_var.get()) else APP_DIR, parent=win)
             if folder:
+                folder = os.path.abspath(folder)
                 path_var.set(folder)
+                try:
+                    set_pdf_dir(folder)
+                    status_var.set("Selected folder saved: " + folder)
+                except Exception as e:
+                    messagebox.showerror("Settings", f"Could not save the location:\n{e}", parent=win)
 
-        ttk.Button(row, text="Browse...", command=choose).pack(
-            side="left", padx=(8, 0)
-        )
+        ttk.Button(row, text="Browse...", command=choose).pack(side="left", padx=(8, 0))
+        status_var = tk.StringVar(value="Current save folder: " + get_pdf_dir())
+        ttk.Label(win, textvariable=status_var, foreground=GREY, wraplength=700).pack(anchor="w", padx=18, pady=8)
 
-        ttk.Label(
-            win,
-            text="New PDF quotations will be saved to this folder. "
-                 "Saved quotation history remains in the app database.",
-            foreground=GREY
-        ).pack(anchor="w", padx=18, pady=12)
+        ttk.Separator(win).pack(fill="x", padx=18, pady=8)
+        ttk.Label(win, text="Manage Users", font=("Segoe UI", 11, "bold")).pack(anchor="w", padx=18, pady=(4, 8))
+        user_frame = ttk.Frame(win)
+        user_frame.pack(fill="x", padx=18)
+        user_list = tk.Listbox(user_frame, height=6)
+        user_list.pack(side="left", fill="x", expand=True)
+        for _, name in get_users():
+            user_list.insert("end", name)
 
-        buttons = ttk.Frame(win)
-        buttons.pack(pady=8)
+        def refresh_users():
+            user_list.delete(0, "end")
+            for _, name in get_users():
+                user_list.insert("end", name)
 
+        def add_user():
+            name = simpledialog.askstring("Add User", "User name:", parent=win)
+            if name and name.strip():
+                try:
+                    c = db(); c.execute("INSERT INTO users(name,active) VALUES(?,1)", (name.strip(),)); c.commit(); c.close()
+                    refresh_users()
+                    status_var.set("User added: " + name.strip())
+                    self.refresh_prepared_users()
+                except sqlite3.IntegrityError:
+                    messagebox.showwarning("Users", "That user already exists.", parent=win)
+
+        def delete_user():
+            sel = user_list.curselection()
+            if not sel:
+                messagebox.showwarning("Users", "Select a user first.", parent=win); return
+            name = user_list.get(sel[0])
+            if name == self.prepared_by.get():
+                messagebox.showwarning("Users", "Select another Prepared By user before deleting this user.", parent=win); return
+            c = db(); c.execute("UPDATE users SET active=0 WHERE name=?", (name,)); c.commit(); c.close()
+            refresh_users(); self.refresh_prepared_users()
+
+        ub = ttk.Frame(win); ub.pack(pady=6)
+        ttk.Button(ub, text="ADD USER", command=add_user).pack(side="left", padx=4)
+        ttk.Button(ub, text="DELETE USER", command=delete_user).pack(side="left", padx=4)
+
+        ttk.Separator(win).pack(fill="x", padx=18, pady=8)
+        ttk.Label(win, text="COD Settings", font=("Segoe UI", 11, "bold")).pack(anchor="w", padx=18, pady=(4, 8))
+        cod = ttk.Frame(win); cod.pack(fill="x", padx=18)
+        first_var = tk.StringVar(value=get_setting("cod_first_kg", "450"))
+        add_var = tk.StringVar(value=get_setting("cod_additional_kg", "100"))
+        comm_var = tk.StringVar(value=get_setting("cod_commission", "2.5"))
+        for i, (label, var) in enumerate([("1st KG Charge", first_var), ("Additional KG Charge", add_var), ("COD Commission %", comm_var)]):
+            ttk.Label(cod, text=label).grid(row=0, column=i, padx=5, sticky="w")
+            ttk.Entry(cod, textvariable=var, width=18).grid(row=1, column=i, padx=5, sticky="ew")
+        ttk.Label(win, text="COD is calculated internally only; it is not shown on customer PDFs.", foreground=GREY).pack(anchor="w", padx=18, pady=8)
+
+        buttons = ttk.Frame(win); buttons.pack(pady=10)
         def save():
-            folder = path_var.get().strip()
-            if not folder:
-                messagebox.showwarning(
-                    "Settings", "Choose a save folder.", parent=win
-                )
-                return
             try:
-                set_pdf_dir(folder)
-                messagebox.showinfo(
-                    "Settings", "Save location updated.", parent=win
-                )
+                if self.num(first_var.get()) < 0 or self.num(add_var.get()) < 0 or self.num(comm_var.get()) < 0:
+                    raise ValueError("COD values cannot be negative.")
+                set_pdf_dir(path_var.get().strip())
+                set_setting("cod_first_kg", self.num(first_var.get()))
+                set_setting("cod_additional_kg", self.num(add_var.get()))
+                set_setting("cod_commission", self.num(comm_var.get()))
+                self.recalc()
+                self.refresh_prepared_users()
+                messagebox.showinfo("Settings", "Settings saved.", parent=win)
                 win.destroy()
             except Exception as e:
-                messagebox.showerror(
-                    "Settings",
-                    f"Could not save the location:\n{e}",
-                    parent=win
-                )
-
+                messagebox.showerror("Settings", f"Could not save settings:\n{e}", parent=win)
         ttk.Button(buttons, text="SAVE", command=save).pack(side="left", padx=5)
         ttk.Button(buttons, text="CANCEL", command=win.destroy).pack(side="left", padx=5)
+
+    def refresh_prepared_users(self):
+        if not hasattr(self, "prepared_combo"):
+            return
+        users = [name for _, name in get_users()]
+        self.prepared_combo["values"] = users
+        if self.prepared_by.get() not in users and users:
+            self.prepared_by.set(users[0])
 
     def new_quote(self):
         self.editing_id = None
@@ -817,7 +931,7 @@ class App:
 
         c = db()
         rows = c.execute(
-            """SELECT id,qno,customer,phone,date,profit,warranty90,warranty180
+            """SELECT id,qno,customer,phone,date,profit,warranty90,warranty180,prepared_by
                FROM quotations ORDER BY id DESC"""
         ).fetchall()
         c.close()
@@ -828,7 +942,7 @@ class App:
                 tree.delete(item)
 
             for row in rows:
-                qid, qno, customer, phone, date, profit, p90, p180 = row
+                qid, qno, customer, phone, date, profit, p90, p180, prepared_by = row
                 hay = " ".join([
                     str(qno or ""), str(customer or ""),
                     str(phone or ""), str(date or "")
@@ -891,7 +1005,7 @@ class App:
         c = db()
         q = c.execute(
             """SELECT id,qno,customer,phone,date,profit,
-                      warranty90,warranty180,weight
+                      warranty90,warranty180,weight,prepared_by
                FROM quotations WHERE id=?""",
             (qid,)
         ).fetchone()
@@ -923,6 +1037,8 @@ class App:
         self.qdate.set(q[4])
         self.profit.set(str(q[5] or 0))
         self.weight.set(str(q[8] or 0))
+        self.prepared_by.set(q[9] or self.prepared_by.get())
+        self.refresh_prepared_users()
 
         for row in self.rows:
             for w in row[4]:
@@ -958,6 +1074,8 @@ class App:
         self.qdate.set(q[4])
         self.profit.set(str(q[5] or 0))
         self.weight.set(str(q[8] or 0))
+        self.prepared_by.set(q[9] or self.prepared_by.get())
+        self.refresh_prepared_users()
 
         for row in self.rows:
             for w in row[4]:
@@ -992,6 +1110,8 @@ class App:
         self.qdate.set(q[4])
         self.profit.set(str(q[5] or 0))
         self.weight.set(str(q[8] or 0))
+        self.prepared_by.set(q[9] or self.prepared_by.get())
+        self.refresh_prepared_users()
 
         for row in self.rows:
             for w in row[4]:
