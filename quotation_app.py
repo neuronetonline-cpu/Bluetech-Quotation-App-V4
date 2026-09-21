@@ -1,15 +1,23 @@
-import os, sqlite3, subprocess, sys
+import os
+import sqlite3
+import subprocess
+import sys
+import webbrowser
 from datetime import datetime
+from urllib.parse import quote
+
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
+
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_RIGHT, TA_LEFT
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, KeepTogether
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
+
 
 APP_DIR = os.path.join(os.path.expanduser("~"), "BluetechQuotationApp")
 os.makedirs(APP_DIR, exist_ok=True)
@@ -57,7 +65,7 @@ def db():
     c.execute("""CREATE TABLE IF NOT EXISTS items(
         id INTEGER PRIMARY KEY AUTOINCREMENT, quotation_id INTEGER,
         product TEXT, description TEXT, qty REAL, cost REAL)""")
-    # Upgrade databases created by the first version.
+
     cols = {r[1] for r in c.execute("PRAGMA table_info(quotations)").fetchall()}
     if "warranty90" not in cols:
         c.execute("ALTER TABLE quotations ADD COLUMN warranty90 REAL DEFAULT 0")
@@ -90,9 +98,17 @@ def set_pdf_dir(folder):
 
 def next_qno():
     c = db()
-    n = c.execute("SELECT COUNT(*) FROM quotations").fetchone()[0] + 1
+    today = datetime.now().strftime("%Y%m%d")
+    rows = c.execute("SELECT qno FROM quotations WHERE qno LIKE ?", (f"QT-{today}-%",)).fetchall()
+    nums = []
+    for (qno,) in rows:
+        try:
+            nums.append(int(str(qno).rsplit("-", 1)[1]))
+        except Exception:
+            pass
+    n = max(nums, default=0) + 1
     c.close()
-    return f"QT-{datetime.now():%Y%m%d}-{n:04d}"
+    return f"QT-{today}-{n:04d}"
 
 
 def money(v):
@@ -112,34 +128,54 @@ class App:
     def build(self):
         top = ttk.Frame(self.root, padding=12)
         top.pack(fill="x")
-        ttk.Label(top, text="BLUETECH COMPUTERS", font=("Segoe UI", 20, "bold")).pack(side="left")
+        ttk.Label(
+            top, text="BLUETECH COMPUTERS",
+            font=("Segoe UI", 20, "bold")
+        ).pack(side="left")
+
         ttk.Button(top, text="Settings", command=self.settings).pack(side="right", padx=5)
         ttk.Button(top, text="Quotation History", command=self.history).pack(side="right", padx=5)
         ttk.Button(top, text="New Quotation", command=self.new_quote).pack(side="right")
 
         info = ttk.LabelFrame(self.root, text="Customer / Quotation", padding=10)
         info.pack(fill="x", padx=12, pady=5)
+
         self.qno = tk.StringVar(value=next_qno())
         self.customer = tk.StringVar()
         self.phone = tk.StringVar()
         self.qdate = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
-        fields = [("Quotation No.", self.qno), ("Customer Name", self.customer),
-                  ("WhatsApp / Phone", self.phone), ("Date", self.qdate)]
+
+        fields = [
+            ("Quotation No.", self.qno),
+            ("Customer Name", self.customer),
+            ("WhatsApp / Phone", self.phone),
+            ("Date", self.qdate)
+        ]
         for i, (lab, var) in enumerate(fields):
             ttk.Label(info, text=lab).grid(row=0, column=i * 2, sticky="w", padx=5)
-            ttk.Entry(info, textvariable=var, width=25).grid(row=0, column=i * 2 + 1, sticky="ew", padx=5)
+            ttk.Entry(info, textvariable=var, width=25).grid(
+                row=0, column=i * 2 + 1, sticky="ew", padx=5
+            )
         for i in range(8):
             info.columnconfigure(i, weight=1)
 
-        box = ttk.LabelFrame(self.root, text="Quotation Items (Cost and Profit are INTERNAL ONLY)", padding=8)
+        box = ttk.LabelFrame(
+            self.root,
+            text="Quotation Items (Cost and Profit are INTERNAL ONLY)",
+            padding=8
+        )
         box.pack(fill="both", expand=True, padx=12, pady=5)
 
         heads = ["PRODUCT", "PRODUCT DESCRIPTION", "QTY", "COST (INTERNAL)", "REMOVE"]
         for j, h in enumerate(heads):
-            ttk.Label(box, text=h, font=("Segoe UI", 9, "bold")).grid(row=0, column=j, padx=3, pady=4, sticky="ew")
+            ttk.Label(
+                box, text=h, font=("Segoe UI", 9, "bold")
+            ).grid(row=0, column=j, padx=3, pady=4, sticky="ew")
+
         self.table = ttk.Frame(box)
         self.table.grid(row=1, column=0, columnspan=5, sticky="nsew")
         box.rowconfigure(1, weight=1)
+
         for j, w in enumerate([23, 42, 10, 20, 10]):
             box.columnconfigure(j, weight=1, minsize=w * 8)
 
@@ -149,7 +185,10 @@ class App:
 
         controls = ttk.Frame(self.root, padding=8)
         controls.pack(fill="x", padx=12)
-        ttk.Button(controls, text="+ ADD PRODUCT / ROW", command=lambda: self.add_row("")).pack(side="left")
+        ttk.Button(
+            controls, text="+ ADD PRODUCT / ROW",
+            command=lambda: self.add_row("")
+        ).pack(side="left")
 
         self.total_cost = tk.StringVar(value="LKR 0.00")
         self.profit = tk.StringVar(value="0")
@@ -159,6 +198,7 @@ class App:
 
         calc = ttk.LabelFrame(self.root, text="Internal Calculation", padding=10)
         calc.pack(fill="x", padx=12, pady=5)
+
         labels = [
             ("Total Cost", self.total_cost),
             ("Requested Profit", self.profit),
@@ -172,13 +212,30 @@ class App:
             e.grid(row=1, column=i, padx=5)
             if lab in ("Requested Profit", "Weight (KG)"):
                 e.bind("<KeyRelease>", lambda e: self.recalc())
-        ttk.Button(calc, text="CALCULATE", command=self.recalc).grid(row=1, column=5, padx=8)
+
+        ttk.Button(calc, text="CALCULATE", command=self.recalc).grid(
+            row=1, column=5, padx=8
+        )
 
         actions = ttk.Frame(self.root, padding=10)
         actions.pack(fill="x", padx=12)
-        ttk.Button(actions, text="PREVIEW / SAVE PDF", command=self.save_pdf).pack(side="right", padx=5)
-        ttk.Button(actions, text="SAVE QUOTATION", command=self.save_quote).pack(side="right", padx=5)
-        ttk.Button(actions, text="CLEAR", command=self.new_quote).pack(side="right", padx=5)
+        ttk.Button(
+            actions, text="WHATSAPP QUOTATION",
+            command=self.whatsapp_quotation
+        ).pack(side="right", padx=5)
+        ttk.Button(
+            actions, text="PREVIEW / SAVE PDF",
+            command=self.save_pdf
+        ).pack(side="right", padx=5)
+        ttk.Button(
+            actions, text="SAVE QUOTATION",
+            command=self.save_quote
+        ).pack(side="right", padx=5)
+        ttk.Button(
+            actions, text="CLEAR",
+            command=self.new_quote
+        ).pack(side="right", padx=5)
+
         self.recalc()
 
     def add_row(self, product="", silent=False):
@@ -188,14 +245,20 @@ class App:
         q = tk.StringVar(value="1")
         c = tk.StringVar(value="0")
         widgets = []
+
         for j, var in enumerate([p, d, q, c]):
             e = ttk.Entry(self.table, textvariable=var)
             e.grid(row=r, column=j, padx=2, pady=2, sticky="ew")
             widgets.append(e)
             e.bind("<KeyRelease>", lambda e: self.recalc())
-        btn = ttk.Button(self.table, text="X", width=5, command=lambda rr=r: self.remove_row(rr))
+
+        btn = ttk.Button(
+            self.table, text="X", width=5,
+            command=lambda rr=r: self.remove_row(rr)
+        )
         btn.grid(row=r, column=4, padx=2)
         self.rows.append((p, d, q, c, widgets, btn))
+
         if not silent:
             self.recalc()
 
@@ -206,6 +269,7 @@ class App:
             w.destroy()
         self.rows[idx][5].destroy()
         self.rows.pop(idx)
+
         for r, row in enumerate(self.rows):
             for j, w in enumerate(row[4]):
                 w.grid_configure(row=r, column=j)
@@ -223,9 +287,11 @@ class App:
         for p, d, q, c, *_ in self.rows:
             qty = self.num(q.get())
             cost += qty * self.num(c.get())
+
         profit = self.num(self.profit.get())
         final90 = cost + profit
         final180 = final90 * 1.35
+
         self.total_cost.set(money(cost))
         self.final90.set(money(final90))
         self.final180.set(money(final180))
@@ -234,110 +300,232 @@ class App:
         out = []
         for p, d, q, c, *_ in self.rows:
             if p.get().strip() and self.num(q.get()) > 0:
-                out.append((p.get().strip(), d.get().strip(), self.num(q.get()), self.num(c.get())))
+                out.append((
+                    p.get().strip(),
+                    d.get().strip(),
+                    self.num(q.get()),
+                    self.num(c.get())
+                ))
         return out
 
-    def save_quote(self):
+    def save_quote(self, show_message=True):
         items = self.collect_items()
         if not self.customer.get().strip():
             messagebox.showwarning("Customer", "Enter customer name.")
-            return
+            return None
+
+        qno = self.qno.get().strip()
+        if not qno:
+            qno = next_qno()
+            self.qno.set(qno)
+
         self.recalc()
         c = db()
-        values = (self.qno.get(), self.customer.get(), self.phone.get(), self.qdate.get(),
-                  self.num(self.profit.get()), self.num(self.final90.get()), self.num(self.final180.get()),
-                  self.num(self.weight.get()), datetime.now().isoformat())
+
+        duplicate = c.execute(
+            "SELECT id FROM quotations WHERE qno=? AND id!=?",
+            (qno, self.editing_id or -1)
+        ).fetchone()
+        if duplicate:
+            c.close()
+            messagebox.showerror(
+                "Duplicate Quotation No.",
+                f"Quotation number {qno} already exists.\n"
+                "Please use a different quotation number."
+            )
+            return None
+
+        values = (
+            qno,
+            self.customer.get().strip(),
+            self.phone.get().strip(),
+            self.qdate.get().strip(),
+            self.num(self.profit.get()),
+            self.num(self.final90.get()),
+            self.num(self.final180.get()),
+            self.num(self.weight.get()),
+            datetime.now().isoformat()
+        )
+
         if self.editing_id is not None:
-            c.execute("""UPDATE quotations SET qno=?,customer=?,phone=?,date=?,profit=?,warranty90=?,warranty180=?,weight=?,created_at=? WHERE id=?""",
-                      values + (self.editing_id,))
+            c.execute(
+                """UPDATE quotations
+                   SET qno=?,customer=?,phone=?,date=?,profit=?,
+                       warranty90=?,warranty180=?,weight=?,created_at=?
+                   WHERE id=?""",
+                values + (self.editing_id,)
+            )
             c.execute("DELETE FROM items WHERE quotation_id=?", (self.editing_id,))
             qid = self.editing_id
             action = "updated"
         else:
-            c.execute("""INSERT INTO quotations(qno,customer,phone,date,profit,warranty90,warranty180,weight,created_at)
-                         VALUES(?,?,?,?,?,?,?,?,?)""", values)
+            c.execute(
+                """INSERT INTO quotations
+                   (qno,customer,phone,date,profit,warranty90,warranty180,weight,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?)""",
+                values
+            )
             qid = c.execute("SELECT last_insert_rowid()").fetchone()[0]
             action = "saved"
-        c.executemany("INSERT INTO items(quotation_id,product,description,qty,cost) VALUES(?,?,?,?,?)",
-                      [(qid, *x) for x in items])
+
+        c.executemany(
+            """INSERT INTO items
+               (quotation_id,product,description,qty,cost)
+               VALUES(?,?,?,?,?)""",
+            [(qid, *x) for x in items]
+        )
         c.commit()
         c.close()
+
         self.editing_id = qid
-        messagebox.showinfo("Saved", f"Quotation {self.qno.get()} {action}.")
+
+        if show_message:
+            messagebox.showinfo(
+                "Saved",
+                f"Quotation {self.qno.get()} {action}."
+            )
         return qid
 
-    def save_pdf(self):
+    def save_pdf(self, silent=False):
         self.recalc()
         items = self.collect_items()
         if not self.customer.get().strip():
             messagebox.showwarning("Customer", "Enter customer name.")
-            return
+            return None
 
         filename = os.path.join(get_pdf_dir(), f"{self.qno.get()}.pdf")
-        styles = getSampleStyleSheet()
-        title = ParagraphStyle("title", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=24,
-                               leading=27, textColor=colors.HexColor(DARK_BLUE), alignment=TA_LEFT, spaceAfter=2)
-        logo_font = "DeadlyAdvance" if DEADLY_ADVANCE_AVAILABLE else "Helvetica-Bold"
-        subtitle = ParagraphStyle("subtitle", parent=styles["BodyText"], fontSize=8.5, leading=10,
-                                  textColor=colors.HexColor(DARK_BLUE), alignment=TA_LEFT)
-        small = ParagraphStyle("small", parent=styles["BodyText"], fontSize=7.5, leading=9.5, textColor=colors.HexColor(GREY))
-        normal = ParagraphStyle("normal", parent=styles["BodyText"], fontSize=8.5, leading=11, textColor=colors.HexColor(DARK_BLUE))
-        info_style = ParagraphStyle("info", parent=styles["BodyText"], fontSize=8.5, leading=12, textColor=colors.HexColor(DARK_BLUE))
-        price_style = ParagraphStyle("price", parent=styles["BodyText"], fontName="Helvetica-Bold", fontSize=14,
-                                     leading=16, textColor=colors.white, alignment=TA_CENTER)
-        warranty_style = ParagraphStyle("warranty", parent=styles["BodyText"], fontName="Helvetica-Bold", fontSize=10,
-                                        leading=12, textColor=colors.HexColor(DARK_BLUE), alignment=TA_LEFT)
 
-        doc = SimpleDocTemplate(filename, pagesize=A4, rightMargin=12 * mm, leftMargin=12 * mm,
-                                topMargin=10 * mm, bottomMargin=10 * mm)
+        styles = getSampleStyleSheet()
+        title = ParagraphStyle(
+            "title", parent=styles["Title"], fontName="Helvetica-Bold",
+            fontSize=24, leading=27, textColor=colors.HexColor(DARK_BLUE),
+            alignment=TA_LEFT, spaceAfter=2
+        )
+        logo_font = "DeadlyAdvance" if DEADLY_ADVANCE_AVAILABLE else "Helvetica-Bold"
+
+        subtitle = ParagraphStyle(
+            "subtitle", parent=styles["BodyText"], fontSize=8.5, leading=10,
+            textColor=colors.HexColor(DARK_BLUE), alignment=TA_LEFT
+        )
+        small = ParagraphStyle(
+            "small", parent=styles["BodyText"], fontSize=7.5, leading=9.5,
+            textColor=colors.HexColor(GREY)
+        )
+        normal = ParagraphStyle(
+            "normal", parent=styles["BodyText"], fontSize=8.5, leading=11,
+            textColor=colors.HexColor(DARK_BLUE)
+        )
+        info_style = ParagraphStyle(
+            "info", parent=styles["BodyText"], fontSize=8.5, leading=12,
+            textColor=colors.HexColor(DARK_BLUE)
+        )
+        customer_style = ParagraphStyle(
+            "customer", parent=info_style, fontName="Helvetica-Bold"
+        )
+
+        doc = SimpleDocTemplate(
+            filename, pagesize=A4,
+            rightMargin=12 * mm, leftMargin=12 * mm,
+            topMargin=10 * mm, bottomMargin=10 * mm
+        )
+
         story = []
 
-        logo_style = ParagraphStyle("logo", parent=title, fontName=logo_font, fontSize=24, leading=25,
-                                    textColor=colors.HexColor(DARK_BLUE), alignment=TA_LEFT)
-        header_left = [Paragraph("BLUETECH COMPUTERS", logo_style),
-                       Paragraph("Computer Sales | Repairs | Upgrades", subtitle)]
-        contact = Paragraph("<b>077 633 7942</b><br/><b>074 394 6233</b><br/>230,<br/>1st Floor, Lakyanya Plaza,<br/>Highlevel Road, Maharagama", info_style)
-        header = Table([[header_left, contact]], colWidths=[112 * mm, 68 * mm])
+        logo_style = ParagraphStyle(
+            "logo", parent=title, fontName=logo_font,
+            fontSize=24, leading=25,
+            textColor=colors.HexColor(DARK_BLUE), alignment=TA_LEFT
+        )
+
+        header_left = [
+            Paragraph("BLUETECH COMPUTERS", logo_style),
+            Paragraph("Computer Sales | Repairs | Upgrades", subtitle)
+        ]
+
+        contact = Paragraph(
+            "<b>077 633 7942</b><br/>"
+            "<b>074 394 6233</b><br/>"
+            "230,<br/>1st Floor, Lakyanya Plaza,<br/>"
+            "Highlevel Road, Maharagama",
+            info_style
+        )
+
+        header = Table(
+            [[header_left, contact]],
+            colWidths=[112 * mm, 68 * mm]
+        )
         header.setStyle(TableStyle([
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
             ("LINEBELOW", (0, 0), (-1, -1), 1.1, colors.HexColor(BLUE)),
         ]))
         story.append(header)
         story.append(Spacer(1, 6))
 
-        qtitle = Table([[Paragraph("QUOTATION", title),
-                         Paragraph(f"<b>Quotation No</b> : {self.qno.get()}<br/><b>Date</b> : {self.qdate.get()}<br/><b>Customer</b> : {self.customer.get()}<br/><b>Phone / WhatsApp</b> : {self.phone.get()}", info_style)]],
-                       colWidths=[105 * mm, 75 * mm])
+        customer_name = self.customer.get().strip() or "-"
+        qinfo = Paragraph(
+            f"<b>Quotation No</b> : {self.qno.get()}<br/>"
+            f"<b>Date</b> : {self.qdate.get()}<br/>"
+            f"<b>Customer</b> : <font name='Helvetica-Bold'>{customer_name}</font><br/>"
+            f"<b>Phone / WhatsApp</b> : {self.phone.get()}",
+            info_style
+        )
+
+        qtitle = Table(
+            [[Paragraph("QUOTATION", title), qinfo]],
+            colWidths=[105 * mm, 75 * mm]
+        )
         qtitle.setStyle(TableStyle([
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ("BACKGROUND", (1, 0), (1, 0), colors.HexColor("#F6FAFF")),
             ("BOX", (1, 0), (1, 0), 0.7, colors.HexColor("#B8D8F5")),
-            ("ROUNDEDCORNERS", [6, 6, 6, 6]),
-            ("LEFTPADDING", (0, 0), (-1, -1), 5), ("RIGHTPADDING", (0, 0), (-1, -1), 5),
-            ("TOPPADDING", (0, 0), (-1, -1), 5), ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+            ("LEFTPADDING", (0, 0), (-1, -1), 5),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
         ]))
         story.append(qtitle)
-        story.append(Paragraph("BUILD YOUR IDEAL PC WITH US", ParagraphStyle("tag", parent=subtitle, fontSize=7.5, leading=9, textColor=colors.HexColor(BLUE))))
+
+        story.append(Paragraph(
+            "BUILD YOUR IDEAL PC WITH US",
+            ParagraphStyle(
+                "tag", parent=subtitle, fontSize=7.5, leading=9,
+                textColor=colors.HexColor(BLUE)
+            )
+        ))
         story.append(Spacer(1, 6))
 
         data = [["#", "PRODUCT", "PRODUCT DESCRIPTION", "QTY"]]
         for i, (p, d, q, c) in enumerate(items, start=1):
-            data.append([str(i), p, d, str(int(q) if float(q).is_integer() else q)])
-        t = Table(data, colWidths=[10 * mm, 49 * mm, 103 * mm, 18 * mm], repeatRows=1)
+            data.append([
+                str(i), p, d,
+                str(int(q) if float(q).is_integer() else q)
+            ])
+
+        t = Table(
+            data,
+            colWidths=[10 * mm, 49 * mm, 103 * mm, 18 * mm],
+            repeatRows=1
+        )
         t.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(BLUE)),
             ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
             ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTSIZE", (0, 0), (-1, -1), 8.6),
+            # Product descriptions are slightly larger for print readability.
+            ("FONTSIZE", (0, 0), (-1, -1), 9.2),
             ("TEXTCOLOR", (0, 1), (-1, -1), colors.HexColor("#162A43")),
             ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#B7C3D0")),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F3F7FB")]),
-            ("LEFTPADDING", (0, 0), (-1, -1), 4), ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-            ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-            ("ALIGN", (0, 0), (0, -1), "CENTER"), ("ALIGN", (-1, 0), (-1, -1), "CENTER"),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1),
+             [colors.white, colors.HexColor("#F3F7FB")]),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ("ALIGN", (0, 0), (0, -1), "CENTER"),
+            ("ALIGN", (-1, 0), (-1, -1), "CENTER"),
         ]))
         story.append(t)
         story.append(Spacer(1, 7))
@@ -345,59 +533,125 @@ class App:
         p90 = self.num(self.final90.get())
         p180 = self.num(self.final180.get())
 
-        # 90-day warranty is the main selling option; 180-day option is intentionally secondary/smaller.
-        warranty90_style = ParagraphStyle("warranty90", parent=styles["BodyText"], fontName="Helvetica-Bold",
-                                          fontSize=11, leading=13, textColor=colors.HexColor(DARK_BLUE), alignment=TA_LEFT)
-        warranty180_style = ParagraphStyle("warranty180", parent=styles["BodyText"], fontName="Helvetica-Bold",
-                                           fontSize=8.5, leading=10, textColor=colors.HexColor(GREEN), alignment=TA_LEFT)
-        price90_style = ParagraphStyle("price90", parent=styles["BodyText"], fontName="Helvetica-Bold", fontSize=15,
-                                       leading=17, textColor=colors.white, alignment=TA_CENTER)
-        price180_style = ParagraphStyle("price180", parent=styles["BodyText"], fontName="Helvetica-Bold", fontSize=11,
-                                        leading=13, textColor=colors.white, alignment=TA_CENTER)
+        # Main selling option: 3 months.
+        warranty90_style = ParagraphStyle(
+            "warranty90", parent=styles["BodyText"],
+            fontName="Helvetica-Bold", fontSize=11.5, leading=13.5,
+            textColor=colors.HexColor(DARK_BLUE), alignment=TA_LEFT
+        )
+        warranty180_style = ParagraphStyle(
+            "warranty180", parent=styles["BodyText"],
+            fontName="Helvetica-Bold", fontSize=8.2, leading=9.5,
+            textColor=colors.HexColor(GREEN), alignment=TA_LEFT
+        )
+        price90_style = ParagraphStyle(
+            "price90", parent=styles["BodyText"],
+            fontName="Helvetica-Bold", fontSize=15, leading=17,
+            textColor=colors.white, alignment=TA_CENTER
+        )
+        price180_style = ParagraphStyle(
+            "price180", parent=styles["BodyText"],
+            fontName="Helvetica-Bold", fontSize=9.8, leading=11,
+            textColor=colors.white, alignment=TA_CENTER
+        )
 
-        w90 = Table([[Paragraph("WITH 3 MONTHS<br/>HARDWARE WARRANTY", warranty90_style),
-                      Paragraph(money(p90), price90_style)]], colWidths=[68 * mm, 44 * mm])
+        w90 = Table(
+            [[
+                Paragraph("3 MONTHS<br/>HARDWARE WARRANTY", warranty90_style),
+                Paragraph(money(p90), price90_style)
+            ]],
+            colWidths=[66 * mm, 46 * mm]
+        )
         w90.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(LIGHT_BLUE)),
             ("BOX", (0, 0), (-1, -1), 0.8, colors.HexColor("#B9DBF8")),
             ("BACKGROUND", (1, 0), (1, 0), colors.HexColor(BLUE)),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 8), ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-            ("TOPPADDING", (0, 0), (-1, -1), 9), ("BOTTOMPADDING", (0, 0), (-1, -1), 9),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+            ("TOPPADDING", (0, 0), (-1, -1), 10),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
         ]))
-        w180 = Table([[Paragraph("WITH 6 MONTHS<br/>HARDWARE WARRANTY", warranty180_style),
-                       Paragraph(money(p180), price180_style)]], colWidths=[48 * mm, 20 * mm])
+
+        # Wider price cell prevents amounts such as LKR 70,132.50 wrapping.
+        w180 = Table(
+            [[
+                Paragraph("6 MONTHS<br/>HARDWARE WARRANTY", warranty180_style),
+                Paragraph(money(p180), price180_style)
+            ]],
+            colWidths=[38 * mm, 30 * mm]
+        )
         w180.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(LIGHT_GREEN)),
             ("BOX", (0, 0), (-1, -1), 0.7, colors.HexColor("#BEE7CB")),
             ("BACKGROUND", (1, 0), (1, 0), colors.HexColor(GREEN)),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 6), ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-            ("TOPPADDING", (0, 0), (-1, -1), 7), ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+            ("LEFTPADDING", (0, 0), (-1, -1), 5),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+            ("TOPPADDING", (0, 0), (-1, -1), 7),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
         ]))
-        warranty_row = Table([[w90, w180]], colWidths=[112 * mm, 68 * mm])
+
+        warranty_row = Table(
+            [[w90, w180]],
+            colWidths=[112 * mm, 68 * mm]
+        )
         warranty_row.setStyle(TableStyle([
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-            ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
         ]))
         story.append(warranty_row)
         story.append(Spacer(1, 7))
 
-        terms = Paragraph("<b>Terms & Conditions</b><br/>• Quotation Validity: Prices are valid for 2 days from the quotation date and time.<br/>• Warranty: Warranty covers MANUFACTURER FAULTS ONLY. Physical damage, burns, liquid damage, and other external damages are not covered.<br/>• Stock Availability: Product availability is subject to change without prior notice.<br/>• Support: For further information or assistance, please contact us by phone or WhatsApp.", small)
-        terms_box = Table([[terms, Paragraph("<b>Thank you<br/>for your business!</b>", ParagraphStyle("thanks", parent=normal, fontSize=11, leading=14, alignment=TA_CENTER))]], colWidths=[126 * mm, 54 * mm])
+        terms = Paragraph(
+            "<b>Terms & Conditions</b><br/>"
+            "• Quotation Validity: Prices are valid for 2 days from the quotation date and time.<br/>"
+            "• Warranty: Warranty covers MANUFACTURER FAULTS ONLY. Physical damage, burns, liquid damage, and other external damages are not covered.<br/>"
+            "• Stock Availability: Product availability is subject to change without prior notice.<br/>"
+            "• Support: For further information or assistance, please contact us by phone or WhatsApp.",
+            small
+        )
+
+        terms_box = Table(
+            [[
+                terms,
+                Paragraph(
+                    "<b>Thank you<br/>for your business!</b>",
+                    ParagraphStyle(
+                        "thanks", parent=normal, fontSize=11,
+                        leading=14, alignment=TA_CENTER
+                    )
+                )
+            ]],
+            colWidths=[126 * mm, 54 * mm]
+        )
         terms_box.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F5F9FE")),
             ("BOX", (0, 0), (-1, -1), 0.7, colors.HexColor("#C7D8EA")),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 8), ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-            ("TOPPADDING", (0, 0), (-1, -1), 7), ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+            ("TOPPADDING", (0, 0), (-1, -1), 7),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
         ]))
         story.append(terms_box)
         story.append(Spacer(1, 7))
-        story.append(Paragraph("Facebook  |  TikTok  |  Google Reviews                 QUALITY PARTS  |  TRUSTED SERVICE  |  BETTER COMPUTING", small))
+
+        footer = Paragraph(
+            "Facebook  |  TikTok  |  Google Reviews<br/>"
+            "QUALITY PARTS  |  TRUSTED SERVICE  |  BETTER COMPUTING",
+            ParagraphStyle(
+                "footer", parent=small, alignment=TA_CENTER,
+                fontSize=7.3, leading=9
+            )
+        )
+        story.append(footer)
 
         doc.build(story)
+
         try:
             if sys.platform.startswith("win"):
                 os.startfile(filename)
@@ -407,31 +661,90 @@ class App:
                 subprocess.Popen(["xdg-open", filename])
         except Exception:
             pass
-        messagebox.showinfo("PDF Created", f"PDF created:\n{filename}\n\nUse the PDF viewer's Share/Send option to send it on WhatsApp.")
+
+        if not silent:
+            messagebox.showinfo(
+                "PDF Created",
+                f"PDF created:\n{filename}\n\n"
+                "You can use the WhatsApp button to open the customer's chat."
+            )
         return filename
+
+    def whatsapp_quotation(self):
+        if not self.customer.get().strip():
+            messagebox.showwarning("Customer", "Enter customer name.")
+            return
+
+        phone = "".join(ch for ch in self.phone.get() if ch.isdigit())
+        if phone.startswith("0"):
+            phone = "94" + phone[1:]
+        elif phone.startswith("94"):
+            pass
+
+        if not phone:
+            messagebox.showwarning("WhatsApp", "Enter the customer's WhatsApp / phone number.")
+            return
+
+        self.recalc()
+        if self.editing_id is None:
+            if self.save_quote(show_message=False) is None:
+                return
+
+        p90 = self.num(self.final90.get())
+        p180 = self.num(self.final180.get())
+        message = (
+            f"Hello {self.customer.get().strip()},\n\n"
+            f"Quotation No: {self.qno.get()}\n"
+            f"Date: {self.qdate.get()}\n\n"
+            f"3 Months Hardware Warranty: {money(p90)}\n"
+            f"6 Months Hardware Warranty: {money(p180)}\n\n"
+            "Thank you for choosing Bluetech Computers.\n"
+            "Computer Sales | Repairs | Upgrades\n"
+            "077 633 7942 / 074 394 6233"
+        )
+
+        url = f"https://wa.me/{phone}?text={quote(message)}"
+        try:
+            webbrowser.open(url)
+        except Exception as e:
+            messagebox.showerror("WhatsApp", f"Could not open WhatsApp:\n{e}")
 
     def settings(self):
         win = tk.Toplevel(self.root)
         win.title("Settings")
-        win.geometry("720x210")
+        win.geometry("720x240")
         win.resizable(False, False)
 
-        ttk.Label(win, text="PDF / Quotation Save Location", font=("Segoe UI", 11, "bold")).pack(anchor="w", padx=18, pady=(18, 8))
+        ttk.Label(
+            win, text="PDF / Quotation Save Location",
+            font=("Segoe UI", 11, "bold")
+        ).pack(anchor="w", padx=18, pady=(18, 8))
+
         row = ttk.Frame(win)
         row.pack(fill="x", padx=18)
+
         path_var = tk.StringVar(value=get_pdf_dir())
         entry = ttk.Entry(row, textvariable=path_var)
         entry.pack(side="left", fill="x", expand=True)
 
         def choose():
-            folder = filedialog.askdirectory(title="Choose quotation save folder", initialdir=path_var.get())
+            folder = filedialog.askdirectory(
+                title="Choose quotation save folder",
+                initialdir=path_var.get()
+            )
             if folder:
                 path_var.set(folder)
 
-        ttk.Button(row, text="Browse...", command=choose).pack(side="left", padx=(8, 0))
+        ttk.Button(row, text="Browse...", command=choose).pack(
+            side="left", padx=(8, 0)
+        )
 
-        ttk.Label(win, text="New PDF quotations will be saved to this folder. Saved quotation history remains in the app database.",
-                  foreground=GREY).pack(anchor="w", padx=18, pady=12)
+        ttk.Label(
+            win,
+            text="New PDF quotations will be saved to this folder. "
+                 "Saved quotation history remains in the app database.",
+            foreground=GREY
+        ).pack(anchor="w", padx=18, pady=12)
 
         buttons = ttk.Frame(win)
         buttons.pack(pady=8)
@@ -439,14 +752,22 @@ class App:
         def save():
             folder = path_var.get().strip()
             if not folder:
-                messagebox.showwarning("Settings", "Choose a save folder.", parent=win)
+                messagebox.showwarning(
+                    "Settings", "Choose a save folder.", parent=win
+                )
                 return
             try:
                 set_pdf_dir(folder)
-                messagebox.showinfo("Settings", "Save location updated.", parent=win)
+                messagebox.showinfo(
+                    "Settings", "Save location updated.", parent=win
+                )
                 win.destroy()
             except Exception as e:
-                messagebox.showerror("Settings", f"Could not save the location:\n{e}", parent=win)
+                messagebox.showerror(
+                    "Settings",
+                    f"Could not save the location:\n{e}",
+                    parent=win
+                )
 
         ttk.Button(buttons, text="SAVE", command=save).pack(side="left", padx=5)
         ttk.Button(buttons, text="CANCEL", command=win.destroy).pack(side="left", padx=5)
@@ -461,63 +782,174 @@ class App:
     def history(self):
         win = tk.Toplevel(self.root)
         win.title("Quotation History")
-        win.geometry("1080x620")
+        win.geometry("1160x650")
 
         search_var = tk.StringVar()
         search_row = ttk.Frame(win, padding=10)
         search_row.pack(fill="x")
-        ttk.Label(search_row, text="Search:").pack(side="left", padx=(0, 6))
-        search_entry = ttk.Entry(search_row, textvariable=search_var, width=55)
-        search_entry.pack(side="left", fill="x", expand=True)
-        ttk.Label(search_row, text="Name / Quotation No. / Phone / Date").pack(side="left", padx=10)
 
-        tree = ttk.Treeview(win, columns=("q", "customer", "phone", "date", "profit", "p90", "p180"), show="headings")
-        headings = ("Quotation No.", "Customer", "Phone", "Date", "Requested Profit", "3 Months", "6 Months")
+        ttk.Label(search_row, text="Search:").pack(side="left", padx=(0, 6))
+        search_entry = ttk.Entry(
+            search_row, textvariable=search_var, width=55
+        )
+        search_entry.pack(side="left", fill="x", expand=True)
+        ttk.Label(
+            search_row,
+            text="Name / Quotation No. / Phone / Date"
+        ).pack(side="left", padx=10)
+
+        tree = ttk.Treeview(
+            win,
+            columns=("q", "customer", "phone", "date", "profit", "p90", "p180"),
+            show="headings"
+        )
+        headings = (
+            "Quotation No.", "Customer", "Phone", "Date",
+            "Requested Profit", "3 Months", "6 Months"
+        )
         widths = (155, 190, 135, 105, 135, 135, 135)
+
         for col, h, width in zip(tree["columns"], headings, widths):
             tree.heading(col, text=h)
             tree.column(col, width=width)
+
         tree.pack(fill="both", expand=True, padx=10, pady=(0, 8))
 
         c = db()
-        rows = c.execute("SELECT id,qno,customer,phone,date,profit,warranty90,warranty180 FROM quotations ORDER BY id DESC").fetchall()
+        rows = c.execute(
+            """SELECT id,qno,customer,phone,date,profit,warranty90,warranty180
+               FROM quotations ORDER BY id DESC"""
+        ).fetchall()
         c.close()
 
         def refresh(*_):
             term = search_var.get().strip().lower()
             for item in tree.get_children():
                 tree.delete(item)
+
             for row in rows:
                 qid, qno, customer, phone, date, profit, p90, p180 = row
-                hay = " ".join([str(qno or ""), str(customer or ""), str(phone or ""), str(date or "")]).lower()
+                hay = " ".join([
+                    str(qno or ""), str(customer or ""),
+                    str(phone or ""), str(date or "")
+                ]).lower()
+
                 if term and term not in hay:
                     continue
-                tree.insert("", "end", iid=str(qid), values=(qno, customer, phone, date, money(profit), money(p90), money(p180)))
+
+                tree.insert(
+                    "", "end", iid=str(qid),
+                    values=(
+                        qno, customer, phone, date,
+                        money(profit), money(p90), money(p180)
+                    )
+                )
 
         search_var.trace_add("write", refresh)
         refresh()
         search_entry.focus_set()
 
-        ttk.Label(win, text="Double-click a quotation to open and edit it.").pack(pady=(0, 4))
+        ttk.Label(
+            win,
+            text="Double-click a quotation to open and edit it."
+        ).pack(pady=(0, 4))
+
         btns = ttk.Frame(win)
         btns.pack(pady=6)
-        ttk.Button(btns, text="OPEN / EDIT SELECTED", command=lambda: self.load_history_item(tree, win)).pack(side="left", padx=5)
-        ttk.Button(btns, text="Close", command=win.destroy).pack(side="left", padx=5)
+
+        ttk.Button(
+            btns, text="OPEN / EDIT SELECTED",
+            command=lambda: self.load_history_item(tree, win)
+        ).pack(side="left", padx=5)
+
+        ttk.Button(
+            btns, text="REPRINT PDF",
+            command=lambda: self.reprint_history_item(tree, win)
+        ).pack(side="left", padx=5)
+
+        ttk.Button(
+            btns, text="WHATSAPP",
+            command=lambda: self.whatsapp_history_item(tree, win)
+        ).pack(side="left", padx=5)
+
+        ttk.Button(
+            btns, text="Close",
+            command=win.destroy
+        ).pack(side="left", padx=5)
+
         tree.bind("<Double-1>", lambda e: self.load_history_item(tree, win))
 
-    def load_history_item(self, tree, win):
+    def get_history_record(self, tree, win):
         selected = tree.selection()
         if not selected:
-            messagebox.showwarning("History", "Select a quotation first.", parent=win)
-            return
+            messagebox.showwarning(
+                "History", "Select a quotation first.", parent=win
+            )
+            return None
+
         qid = int(selected[0])
         c = db()
-        q = c.execute("SELECT id,qno,customer,phone,date,profit,warranty90,warranty180,weight FROM quotations WHERE id=?", (qid,)).fetchone()
-        items = c.execute("SELECT product,description,qty,cost FROM items WHERE quotation_id=? ORDER BY id", (qid,)).fetchall()
+        q = c.execute(
+            """SELECT id,qno,customer,phone,date,profit,
+                      warranty90,warranty180,weight
+               FROM quotations WHERE id=?""",
+            (qid,)
+        ).fetchone()
+        items = c.execute(
+            """SELECT product,description,qty,cost
+               FROM items WHERE quotation_id=? ORDER BY id""",
+            (qid,)
+        ).fetchall()
         c.close()
+
         if not q:
-            messagebox.showerror("History", "Quotation could not be loaded.", parent=win)
+            messagebox.showerror(
+                "History", "Quotation could not be loaded.", parent=win
+            )
+            return None
+
+        return q, items
+
+    def load_history_item(self, tree, win):
+        record = self.get_history_record(tree, win)
+        if not record:
             return
+
+        q, items = record
+        self.editing_id = q[0]
+        self.qno.set(q[1])
+        self.customer.set(q[2])
+        self.phone.set(q[3])
+        self.qdate.set(q[4])
+        self.profit.set(str(q[5] or 0))
+        self.weight.set(str(q[8] or 0))
+
+        for row in self.rows:
+            for w in row[4]:
+                w.destroy()
+            row[5].destroy()
+        self.rows = []
+
+        for p, d, qty, cost in items:
+            self.add_row(p, silent=True)
+            row = self.rows[-1]
+            row[1].set(d or "")
+            row[2].set(str(int(qty) if float(qty).is_integer() else qty))
+            row[3].set(str(cost or 0))
+
+        if not items:
+            self.add_row("", silent=True)
+
+        self.recalc()
+        win.destroy()
+        self.root.lift()
+        self.root.focus_force()
+
+    def reprint_history_item(self, tree, win):
+        record = self.get_history_record(tree, win)
+        if not record:
+            return
+        q, items = record
 
         self.editing_id = q[0]
         self.qno.set(q[1])
@@ -532,18 +964,54 @@ class App:
                 w.destroy()
             row[5].destroy()
         self.rows = []
+
         for p, d, qty, cost in items:
             self.add_row(p, silent=True)
             row = self.rows[-1]
             row[1].set(d or "")
             row[2].set(str(int(qty) if float(qty).is_integer() else qty))
             row[3].set(str(cost or 0))
+
         if not items:
             self.add_row("", silent=True)
+
         self.recalc()
         win.destroy()
-        self.root.lift()
-        self.root.focus_force()
+        self.save_pdf()
+
+    def whatsapp_history_item(self, tree, win):
+        record = self.get_history_record(tree, win)
+        if not record:
+            return
+        q, items = record
+
+        self.editing_id = q[0]
+        self.qno.set(q[1])
+        self.customer.set(q[2])
+        self.phone.set(q[3])
+        self.qdate.set(q[4])
+        self.profit.set(str(q[5] or 0))
+        self.weight.set(str(q[8] or 0))
+
+        for row in self.rows:
+            for w in row[4]:
+                w.destroy()
+            row[5].destroy()
+        self.rows = []
+
+        for p, d, qty, cost in items:
+            self.add_row(p, silent=True)
+            row = self.rows[-1]
+            row[1].set(d or "")
+            row[2].set(str(int(qty) if float(qty).is_integer() else qty))
+            row[3].set(str(cost or 0))
+
+        if not items:
+            self.add_row("", silent=True)
+
+        self.recalc()
+        win.destroy()
+        self.whatsapp_quotation()
 
 
 if __name__ == "__main__":
