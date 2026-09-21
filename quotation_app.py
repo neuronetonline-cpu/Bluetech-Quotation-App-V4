@@ -1,7 +1,7 @@
 import os, sqlite3, subprocess, sys
 from datetime import datetime
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -14,8 +14,6 @@ from reportlab.pdfbase.ttfonts import TTFont
 APP_DIR = os.path.join(os.path.expanduser("~"), "BluetechQuotationApp")
 os.makedirs(APP_DIR, exist_ok=True)
 DB = os.path.join(APP_DIR, "quotations.db")
-PDF_DIR = os.path.join(APP_DIR, "Quotations")
-os.makedirs(PDF_DIR, exist_ok=True)
 
 DEFAULT_PRODUCTS = [
     "MOTHER BOARD", "PROCESSOR", "CPU FAN", "RAMS", "PSU", "CASING", "CASING FANS",
@@ -68,8 +66,26 @@ def db():
     item_cols = {r[1] for r in c.execute("PRAGMA table_info(items)").fetchall()}
     if "cost" not in item_cols:
         c.execute("ALTER TABLE items ADD COLUMN cost REAL DEFAULT 0")
+    c.execute("CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT)")
     c.commit()
     return c
+
+
+def get_pdf_dir():
+    c = db()
+    row = c.execute("SELECT value FROM settings WHERE key='pdf_dir'").fetchone()
+    c.close()
+    folder = row[0] if row and row[0] else os.path.join(APP_DIR, "Quotations")
+    os.makedirs(folder, exist_ok=True)
+    return folder
+
+
+def set_pdf_dir(folder):
+    os.makedirs(folder, exist_ok=True)
+    c = db()
+    c.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('pdf_dir',?)", (folder,))
+    c.commit()
+    c.close()
 
 
 def next_qno():
@@ -97,6 +113,7 @@ class App:
         top = ttk.Frame(self.root, padding=12)
         top.pack(fill="x")
         ttk.Label(top, text="BLUETECH COMPUTERS", font=("Segoe UI", 20, "bold")).pack(side="left")
+        ttk.Button(top, text="Settings", command=self.settings).pack(side="right", padx=5)
         ttk.Button(top, text="Quotation History", command=self.history).pack(side="right", padx=5)
         ttk.Button(top, text="New Quotation", command=self.new_quote).pack(side="right")
 
@@ -145,8 +162,8 @@ class App:
         labels = [
             ("Total Cost", self.total_cost),
             ("Requested Profit", self.profit),
-            ("90 Days Final Price", self.final90),
-            ("180 Days Final Price (+35%)", self.final180),
+            ("3 Months Final Price", self.final90),
+            ("6 Months Final Price (+35%)", self.final180),
             ("Weight (KG)", self.weight),
         ]
         for i, (lab, var) in enumerate(labels):
@@ -256,7 +273,7 @@ class App:
             messagebox.showwarning("Customer", "Enter customer name.")
             return
 
-        filename = os.path.join(PDF_DIR, f"{self.qno.get()}.pdf")
+        filename = os.path.join(get_pdf_dir(), f"{self.qno.get()}.pdf")
         styles = getSampleStyleSheet()
         title = ParagraphStyle("title", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=24,
                                leading=27, textColor=colors.HexColor(DARK_BLUE), alignment=TA_LEFT, spaceAfter=2)
@@ -279,7 +296,7 @@ class App:
                                     textColor=colors.HexColor(DARK_BLUE), alignment=TA_LEFT)
         header_left = [Paragraph("BLUETECH COMPUTERS", logo_style),
                        Paragraph("Computer Sales | Repairs | Upgrades", subtitle)]
-        contact = Paragraph("<b>077 633 7942</b><br/><b>074 394 6233</b><br/>No. 123, Highlevel Road, Maharagama<br/>bluetechcomputers.lk@gmail.com", info_style)
+        contact = Paragraph("<b>077 633 7942</b><br/><b>074 394 6233</b><br/>230,<br/>1st Floor, Lakyanya Plaza,<br/>Highlevel Road, Maharagama", info_style)
         header = Table([[header_left, contact]], colWidths=[112 * mm, 68 * mm])
         header.setStyle(TableStyle([
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
@@ -313,7 +330,7 @@ class App:
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(BLUE)),
             ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
             ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTSIZE", (0, 0), (-1, -1), 7.6),
+            ("FONTSIZE", (0, 0), (-1, -1), 8.6),
             ("TEXTCOLOR", (0, 1), (-1, -1), colors.HexColor("#162A43")),
             ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#B7C3D0")),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
@@ -338,7 +355,7 @@ class App:
         price180_style = ParagraphStyle("price180", parent=styles["BodyText"], fontName="Helvetica-Bold", fontSize=11,
                                         leading=13, textColor=colors.white, alignment=TA_CENTER)
 
-        w90 = Table([[Paragraph("WITH 90 DAYS<br/>HARDWARE WARRANTY", warranty90_style),
+        w90 = Table([[Paragraph("WITH 3 MONTHS<br/>HARDWARE WARRANTY", warranty90_style),
                       Paragraph(money(p90), price90_style)]], colWidths=[68 * mm, 44 * mm])
         w90.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(LIGHT_BLUE)),
@@ -348,7 +365,7 @@ class App:
             ("LEFTPADDING", (0, 0), (-1, -1), 8), ("RIGHTPADDING", (0, 0), (-1, -1), 8),
             ("TOPPADDING", (0, 0), (-1, -1), 9), ("BOTTOMPADDING", (0, 0), (-1, -1), 9),
         ]))
-        w180 = Table([[Paragraph("WITH 180 DAYS<br/>HARDWARE WARRANTY", warranty180_style),
+        w180 = Table([[Paragraph("WITH 6 MONTHS<br/>HARDWARE WARRANTY", warranty180_style),
                        Paragraph(money(p180), price180_style)]], colWidths=[48 * mm, 20 * mm])
         w180.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(LIGHT_GREEN)),
@@ -393,6 +410,47 @@ class App:
         messagebox.showinfo("PDF Created", f"PDF created:\n{filename}\n\nUse the PDF viewer's Share/Send option to send it on WhatsApp.")
         return filename
 
+    def settings(self):
+        win = tk.Toplevel(self.root)
+        win.title("Settings")
+        win.geometry("720x210")
+        win.resizable(False, False)
+
+        ttk.Label(win, text="PDF / Quotation Save Location", font=("Segoe UI", 11, "bold")).pack(anchor="w", padx=18, pady=(18, 8))
+        row = ttk.Frame(win)
+        row.pack(fill="x", padx=18)
+        path_var = tk.StringVar(value=get_pdf_dir())
+        entry = ttk.Entry(row, textvariable=path_var)
+        entry.pack(side="left", fill="x", expand=True)
+
+        def choose():
+            folder = filedialog.askdirectory(title="Choose quotation save folder", initialdir=path_var.get())
+            if folder:
+                path_var.set(folder)
+
+        ttk.Button(row, text="Browse...", command=choose).pack(side="left", padx=(8, 0))
+
+        ttk.Label(win, text="New PDF quotations will be saved to this folder. Saved quotation history remains in the app database.",
+                  foreground=GREY).pack(anchor="w", padx=18, pady=12)
+
+        buttons = ttk.Frame(win)
+        buttons.pack(pady=8)
+
+        def save():
+            folder = path_var.get().strip()
+            if not folder:
+                messagebox.showwarning("Settings", "Choose a save folder.", parent=win)
+                return
+            try:
+                set_pdf_dir(folder)
+                messagebox.showinfo("Settings", "Save location updated.", parent=win)
+                win.destroy()
+            except Exception as e:
+                messagebox.showerror("Settings", f"Could not save the location:\n{e}", parent=win)
+
+        ttk.Button(buttons, text="SAVE", command=save).pack(side="left", padx=5)
+        ttk.Button(buttons, text="CANCEL", command=win.destroy).pack(side="left", padx=5)
+
     def new_quote(self):
         self.editing_id = None
         for w in self.root.winfo_children():
@@ -403,18 +461,42 @@ class App:
     def history(self):
         win = tk.Toplevel(self.root)
         win.title("Quotation History")
-        win.geometry("980x540")
+        win.geometry("1080x620")
+
+        search_var = tk.StringVar()
+        search_row = ttk.Frame(win, padding=10)
+        search_row.pack(fill="x")
+        ttk.Label(search_row, text="Search:").pack(side="left", padx=(0, 6))
+        search_entry = ttk.Entry(search_row, textvariable=search_var, width=55)
+        search_entry.pack(side="left", fill="x", expand=True)
+        ttk.Label(search_row, text="Name / Quotation No. / Phone / Date").pack(side="left", padx=10)
+
         tree = ttk.Treeview(win, columns=("q", "customer", "phone", "date", "profit", "p90", "p180"), show="headings")
-        headings = ("Quotation No.", "Customer", "Phone", "Date", "Requested Profit", "90 Days", "180 Days")
-        for c, h in zip(tree["columns"], headings):
-            tree.heading(c, text=h)
-            tree.column(c, width=135)
-        tree.pack(fill="both", expand=True, padx=10, pady=10)
+        headings = ("Quotation No.", "Customer", "Phone", "Date", "Requested Profit", "3 Months", "6 Months")
+        widths = (155, 190, 135, 105, 135, 135, 135)
+        for col, h, width in zip(tree["columns"], headings, widths):
+            tree.heading(col, text=h)
+            tree.column(col, width=width)
+        tree.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+
         c = db()
-        for row in c.execute("SELECT id,qno,customer,phone,date,profit,warranty90,warranty180 FROM quotations ORDER BY id DESC"):
-            qid, qno, customer, phone, date, profit, p90, p180 = row
-            tree.insert("", "end", iid=str(qid), values=(qno, customer, phone, date, money(profit), money(p90), money(p180)))
+        rows = c.execute("SELECT id,qno,customer,phone,date,profit,warranty90,warranty180 FROM quotations ORDER BY id DESC").fetchall()
         c.close()
+
+        def refresh(*_):
+            term = search_var.get().strip().lower()
+            for item in tree.get_children():
+                tree.delete(item)
+            for row in rows:
+                qid, qno, customer, phone, date, profit, p90, p180 = row
+                hay = " ".join([str(qno or ""), str(customer or ""), str(phone or ""), str(date or "")]).lower()
+                if term and term not in hay:
+                    continue
+                tree.insert("", "end", iid=str(qid), values=(qno, customer, phone, date, money(profit), money(p90), money(p180)))
+
+        search_var.trace_add("write", refresh)
+        refresh()
+        search_entry.focus_set()
 
         ttk.Label(win, text="Double-click a quotation to open and edit it.").pack(pady=(0, 4))
         btns = ttk.Frame(win)
