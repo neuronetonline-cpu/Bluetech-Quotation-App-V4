@@ -83,6 +83,7 @@ def db():
         "cod_first_kg": "450",
         "cod_additional_kg": "100",
         "cod_commission": "2.5",
+        "cod_min_amount": "20000",
     }
     for key, value in defaults.items():
         c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (key, value))
@@ -211,7 +212,7 @@ class App:
         )
         box.pack(fill="both", expand=True, padx=12, pady=5)
 
-        heads = ["PRODUCT", "PRODUCT DESCRIPTION", "QTY", "COST (INTERNAL)", "REMOVE"]
+        heads = ["PRODUCT", "DESCRIPTION", "QTY", "COST", "REMOVE"]
         for j, h in enumerate(heads):
             ttk.Label(
                 box, text=h, font=("Segoe UI", 9, "bold")
@@ -349,6 +350,7 @@ class App:
         first_kg = self.num(get_setting("cod_first_kg", "450"))
         additional_kg = self.num(get_setting("cod_additional_kg", "100"))
         commission_pct = self.num(get_setting("cod_commission", "2.5"))
+        commission_min = self.num(get_setting("cod_min_amount", "20000"))
         if weight <= 0:
             cod_charge = 0
         else:
@@ -356,7 +358,7 @@ class App:
             extra_kg = max(0, math.ceil(weight - 1))
             cod_charge = first_kg + extra_kg * additional_kg
         cod_subtotal = final90 + cod_charge
-        cod_commission = cod_subtotal * commission_pct / 100.0
+        cod_commission = cod_subtotal * commission_pct / 100.0 if cod_subtotal > commission_min else 0
         cod_final = cod_subtotal + cod_commission
 
         self.total_cost.set(money(cost))
@@ -498,7 +500,10 @@ class App:
         doc = SimpleDocTemplate(
             filename, pagesize=A4,
             rightMargin=12 * mm, leftMargin=12 * mm,
-            topMargin=10 * mm, bottomMargin=10 * mm
+            topMargin=10 * mm, bottomMargin=10 * mm,
+            title=f"Bluetech Computers - Quotation {self.qno.get()}",
+            author="Bluetech Computers",
+            subject="Quotation"
         )
 
         story = []
@@ -798,13 +803,9 @@ class App:
         def choose():
             folder = filedialog.askdirectory(title="Choose quotation save folder", initialdir=path_var.get() if os.path.isdir(path_var.get()) else APP_DIR, parent=win)
             if folder:
-                folder = os.path.abspath(folder)
+                folder = os.path.normpath(os.path.abspath(folder))
                 path_var.set(folder)
-                try:
-                    set_pdf_dir(folder)
-                    status_var.set("Selected folder saved: " + folder)
-                except Exception as e:
-                    messagebox.showerror("Settings", f"Could not save the location:\n{e}", parent=win)
+                status_var.set("Selected folder: " + folder)
 
         ttk.Button(row, text="Browse...", command=choose).pack(side="left", padx=(8, 0))
         status_var = tk.StringVar(value="Current save folder: " + get_pdf_dir())
@@ -855,7 +856,8 @@ class App:
         first_var = tk.StringVar(value=get_setting("cod_first_kg", "450"))
         add_var = tk.StringVar(value=get_setting("cod_additional_kg", "100"))
         comm_var = tk.StringVar(value=get_setting("cod_commission", "2.5"))
-        for i, (label, var) in enumerate([("1st KG Charge", first_var), ("Additional KG Charge", add_var), ("COD Commission %", comm_var)]):
+        min_var = tk.StringVar(value=get_setting("cod_min_amount", "20000"))
+        for i, (label, var) in enumerate([("1st KG Charge", first_var), ("Additional KG Charge", add_var), ("COD Commission %", comm_var), ("Commission Minimum Amount", min_var)]):
             ttk.Label(cod, text=label).grid(row=0, column=i, padx=5, sticky="w")
             ttk.Entry(cod, textvariable=var, width=18).grid(row=1, column=i, padx=5, sticky="ew")
         ttk.Label(win, text="COD is calculated internally only; it is not shown on customer PDFs.", foreground=GREY).pack(anchor="w", padx=18, pady=8)
@@ -863,12 +865,13 @@ class App:
         buttons = ttk.Frame(win); buttons.pack(pady=10)
         def save():
             try:
-                if self.num(first_var.get()) < 0 or self.num(add_var.get()) < 0 or self.num(comm_var.get()) < 0:
+                if self.num(first_var.get()) < 0 or self.num(add_var.get()) < 0 or self.num(comm_var.get()) < 0 or self.num(min_var.get()) < 0:
                     raise ValueError("COD values cannot be negative.")
                 set_pdf_dir(path_var.get().strip())
                 set_setting("cod_first_kg", self.num(first_var.get()))
                 set_setting("cod_additional_kg", self.num(add_var.get()))
                 set_setting("cod_commission", self.num(comm_var.get()))
+                set_setting("cod_min_amount", self.num(min_var.get()))
                 self.recalc()
                 self.refresh_prepared_users()
                 messagebox.showinfo("Settings", "Settings saved.", parent=win)
@@ -977,6 +980,11 @@ class App:
         ).pack(side="left", padx=5)
 
         ttk.Button(
+            btns, text="SAVE AS NEW QUOTATION",
+            command=lambda: self.save_history_item_as_new(tree, win)
+        ).pack(side="left", padx=5)
+
+        ttk.Button(
             btns, text="REPRINT PDF",
             command=lambda: self.reprint_history_item(tree, win)
         ).pack(side="left", padx=5)
@@ -1060,6 +1068,41 @@ class App:
         win.destroy()
         self.root.lift()
         self.root.focus_force()
+
+    def save_history_item_as_new(self, tree, win):
+        record = self.get_history_record(tree, win)
+        if not record:
+            return
+        q, items = record
+        # Load selected quotation into the editor, but deliberately detach it from the old DB id.
+        self.editing_id = None
+        self.qno.set(next_qno())
+        self.customer.set(q[2] or "")
+        self.phone.set(q[3] or "")
+        self.qdate.set(datetime.now().strftime("%Y-%m-%d"))
+        self.profit.set(str(q[5] or 0))
+        self.weight.set(str(q[8] or 0))
+        self.prepared_by.set(q[9] or self.prepared_by.get())
+        self.refresh_prepared_users()
+
+        for row in self.rows:
+            for w in row[4]:
+                w.destroy()
+            row[5].destroy()
+        self.rows = []
+        for p, d, qty, cost in items:
+            self.add_row(p, silent=True)
+            row = self.rows[-1]
+            row[1].set(d or "")
+            row[2].set(str(int(qty) if float(qty).is_integer() else qty))
+            row[3].set(str(cost or 0))
+        if not items:
+            self.add_row("", silent=True)
+        self.recalc()
+        win.destroy()
+        self.root.lift()
+        self.root.focus_force()
+        messagebox.showinfo("Save As New", f"New quotation {self.qno.get()} is ready.\nEdit the details if needed, then click SAVE QUOTATION.")
 
     def reprint_history_item(self, tree, win):
         record = self.get_history_record(tree, win)
